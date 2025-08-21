@@ -1,17 +1,18 @@
-﻿using System;
+﻿using MetadataExtractor;
+using MissionPlanner.Plugin;
+using MissionPlanner.Utilities;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Windows.Forms;
-using MissionPlanner.Plugin;
-using MissionPlanner.Utilities;
 
 namespace ImageOverlayPlugin
 {
     public class Plugin : MissionPlanner.Plugin.Plugin
     {
         public override string Name => "Image Overlay Plugin";
-        public override string Version => "0.6";
+        public override string Version => "0.0.8";
         public override string Author => "IDPA";
 
         private ToolStripMenuItem _iopMenu;
@@ -27,13 +28,15 @@ namespace ImageOverlayPlugin
         public override bool Loaded()
         {
             // 1) prove load
-            MessageBox.Show("IOP plugin loaded (GUI only).", "IOP");
+            MessageBox.Show("IOP plugin loaded.", "IOP", MessageBoxButtons.OK);
 
             // 2) add top menu
             var menu = Host.MainForm?
                 .Controls
                 .OfType<MenuStrip>()
                 .FirstOrDefault() ?? Host.MainForm?.MainMenuStrip;
+
+            menu.BackColor = System.Drawing.Color.FromArgb(0xFF, 0xE0, 0xE0, 0xE0); // light gray
 
             if (menu == null)
             {
@@ -42,7 +45,7 @@ namespace ImageOverlayPlugin
             }
 
             _iopMenu = new ToolStripMenuItem("IOP");
-            _miConfig = new ToolStripMenuItem("Config…", null, (s, e) => DoConfig());
+            //_miConfig = new ToolStripMenuItem("Config…", null, (s, e) => DoConfig());
             _miReload = new ToolStripMenuItem("Reload", null, (s, e) => DoReloadStub());
             _miShowHide = new ToolStripMenuItem("Show / Hide", null, (s, e) => DoShowHide());
             _miLayers = new ToolStripMenuItem("Layers");
@@ -50,10 +53,18 @@ namespace ImageOverlayPlugin
 
             _iopMenu.DropDownItems.AddRange(new ToolStripItem[]
             {
-                _miConfig, _miReload, _miShowHide,
+                _miReload, _miShowHide,
                 new ToolStripSeparator(),
                 _miLayers
             });
+
+            _iopMenu.BackColor = System.Drawing.Color.FromArgb(0xFF, 0xE0, 0xE0, 0xE0); // light gray
+
+            _iopMenu.ForeColor = System.Drawing.Color.White; // white text
+
+            // on hover black text
+            _iopMenu.MouseEnter += (s, e) => _iopMenu.ForeColor = System.Drawing.Color.Black;
+            _iopMenu.MouseLeave += (s, e) => _iopMenu.ForeColor = System.Drawing.Color.White;
 
             InsertBeforeHelp(menu, _iopMenu);
             RefreshShowHideCaption();
@@ -61,7 +72,7 @@ namespace ImageOverlayPlugin
             // try restore last selection (optional)
             if (Settings.Instance["iop_last_layer"] is string lastName &&
                 Settings.Instance["iop_last_folder"] is string lastFolder &&
-                Directory.Exists(lastFolder))
+                System.IO.Directory.Exists(lastFolder))
             {
                 _layers[lastName] = new LayerInfo { Name = lastName, Folder = lastFolder, Visible = true };
                 _activeLayer = lastName;
@@ -199,8 +210,11 @@ namespace ImageOverlayPlugin
                 return;
             }
 
-            MessageBox.Show($"Would reload files from:\n{li.Folder}\n\n(Real import logic will be added in Step 2.)", "IOP");
+            LoadImages(li);
+
+            MessageBox.Show($"Loaded {li.Images.Count} images from:\n{li.Folder}", "IOP");
         }
+
 
         private void DoShowHide()
         {
@@ -250,6 +264,66 @@ namespace ImageOverlayPlugin
             public string Name { get; set; }
             public string Folder { get; set; }
             public bool Visible { get; set; } = true;
+            public List<ImageInfo> Images { get; } = new List<ImageInfo>();
         }
+        private sealed class ImageInfo
+        {
+            public string Path { get; set; }
+            public double? Latitude { get; set; }
+            public double? Longitude { get; set; }
+            public DateTime? ShotTime { get; set; }
+        }
+
+
+
+
+        private void LoadImages(LayerInfo layer)
+        {
+            layer.Images.Clear();
+            if (!System.IO.Directory.Exists(layer.Folder))
+                return;
+
+            var exts = new[] { ".jpg", ".jpeg", ".tif", ".tiff", ".png" };
+
+            foreach (var file in System.IO.Directory.GetFiles(layer.Folder))
+            {
+                if (!exts.Contains(Path.GetExtension(file).ToLowerInvariant()))
+                    continue;
+
+                try
+                {
+                    // Use MetadataExtractor for robust EXIF reading
+                    var dirs = MetadataExtractor.ImageMetadataReader.ReadMetadata(file);
+
+                    var gps = dirs.OfType<MetadataExtractor.Formats.Exif.GpsDirectory>().FirstOrDefault();
+                    double? lat = null, lon = null;
+                    if (gps != null)
+                    {
+                        var loc = gps.GetGeoLocation();
+                        if (loc != null && !loc.IsZero)
+                        {
+                            lat = loc.Latitude;
+                            lon = loc.Longitude;
+                        }
+                    }
+
+                    var exif = dirs.OfType<MetadataExtractor.Formats.Exif.ExifSubIfdDirectory>().FirstOrDefault();
+                    DateTime? shotTime = exif?.GetDateTime(MetadataExtractor.Formats.Exif.ExifDirectoryBase.TagDateTimeOriginal);
+
+                    layer.Images.Add(new ImageInfo
+                    {
+                        Path = file,
+                        Latitude = lat,
+                        Longitude = lon,
+                        ShotTime = shotTime
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"Error reading {file}: {ex.Message}");
+                }
+            }
+        }
+
     }
 }
